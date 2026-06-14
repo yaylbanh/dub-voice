@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.cache/
+dubvoice/_voice_catalog.json
+_test.srt
+_out.*
+*.dubproj.json
+build/
+dist/
+*.spec
