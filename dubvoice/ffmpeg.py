@@ -51,6 +51,10 @@ def ffprobe_path() -> str:
     return _resolve("ffprobe")
 
 
+def ffplay_path() -> str:
+    return _resolve("ffplay")
+
+
 def run(args: list[str], *, check: bool = True) -> subprocess.CompletedProcess:
     """Chạy ffmpeg với danh sách tham số (đã bỏ tên lệnh đầu)."""
     cmd = [ffmpeg_path(), "-hide_banner", "-loglevel", "error", "-y", *args]

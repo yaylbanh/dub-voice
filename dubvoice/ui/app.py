@@ -17,6 +17,7 @@ from .. import voices as voices_mod
 from ..fit import HEAVY_DRIFT_MS, compute as compute_fit
 from ..project import Block, Project, _default_voice_set
 from ..voices import VoiceConfig
+from .preview import PreviewPlayer
 from .worker import RenderWorker
 
 # Ước lượng thô tốc độ đọc để xem trước cột Fit khi chưa render (ký tự / giây).
@@ -36,6 +37,7 @@ class MainWindow(QMainWindow):
         self.worker: RenderWorker | None = None
         self._catalog = voices_mod.all_voices()
         self._only_drift = False
+        self.player = PreviewPlayer()
         self._build_ui()
 
     # ---------------- UI ----------------
@@ -87,14 +89,13 @@ class MainWindow(QMainWindow):
         wrap = QWidget()
         lay = QVBoxLayout(wrap)
         lay.setContentsMargins(0, 0, 0, 0)
-        self.table = QTableWidget(0, 5)
-        self.table.setHorizontalHeaderLabels(["#", "Bật", "Giọng", "Text", "Fit"])
+        self.table = QTableWidget(0, 7)
+        self.table.setHorizontalHeaderLabels(
+            ["#", "Bật", "Giọng", "Text", "Fit", "Nghe", "Tạo lại"])
         h = self.table.horizontalHeader()
-        h.setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        h.setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        h.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        for col in (0, 1, 2, 4, 5, 6):
+            h.setSectionResizeMode(col, QHeaderView.ResizeToContents)
         h.setSectionResizeMode(3, QHeaderView.Stretch)
-        h.setSectionResizeMode(4, QHeaderView.ResizeToContents)
         self.table.verticalHeader().setVisible(False)
         lay.addWidget(self.table)
         return wrap
@@ -410,6 +411,18 @@ class MainWindow(QMainWindow):
             self.table.setItem(row, 3, txt)
             # fit
             self.table.setItem(row, 4, self._fit_item(b))
+            # nghe thử
+            b_play = QPushButton("▶")
+            b_play.setFixedWidth(34)
+            b_play.setToolTip("Nghe thử (dùng cache nếu có)")
+            b_play.clicked.connect(lambda _c, blk=b: self._preview(blk, regenerate=False))
+            self.table.setCellWidget(row, 5, self._center(b_play))
+            # tạo lại
+            b_regen = QPushButton("↻")
+            b_regen.setFixedWidth(34)
+            b_regen.setToolTip("Tạo lại voice (bỏ cache, sinh mới rồi nghe)")
+            b_regen.clicked.connect(lambda _c, blk=b: self._preview(blk, regenerate=True))
+            self.table.setCellWidget(row, 6, self._center(b_regen))
         self._update_stats()
 
     def _fit_item(self, b: Block) -> QTableWidgetItem:
@@ -476,6 +489,20 @@ class MainWindow(QMainWindow):
             f"Tổng {s['total']} block · {s['active']} bật · "
             f"{s['unassigned']} chưa gán · {vid}")
 
+    # -------- nghe thử / tạo lại --------
+    def _preview(self, block: Block, *, regenerate: bool):
+        if not self.project:
+            return
+        cfg = self.project.resolve_voice(block)
+        if cfg is None:
+            QMessageBox.warning(self, "Chưa có giọng", "Block này chưa được gán giọng.")
+            return
+        self.player.play(
+            block.text, cfg, self.project.locale, regenerate=regenerate,
+            on_error=lambda m: self.statusBar().showMessage(f"Lỗi nghe thử: {m}", 5000),
+            on_state=lambda m: self.statusBar().showMessage(m, 3000) if m else None,
+        )
+
     # -------- render --------
     def start_render(self):
         if not self.project:
@@ -515,6 +542,10 @@ class MainWindow(QMainWindow):
         self.btn_render.setEnabled(True)
         self.btn_render.setText("▶  Render & Xuất")
         QMessageBox.critical(self, "Lỗi render", msg)
+
+    def closeEvent(self, event):
+        self.player.stop()
+        super().closeEvent(event)
 
 
 def main():
