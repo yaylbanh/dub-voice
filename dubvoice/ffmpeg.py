@@ -12,8 +12,16 @@ import subprocess
 from functools import lru_cache
 from pathlib import Path
 
-# ffmpeg đi kèm trong project gốc (review-drama/ffmpeg_bin) nếu có.
-_BUNDLED = Path(__file__).resolve().parents[2] / "ffmpeg_bin"
+# Các vị trí có thể chứa ffmpeg đi kèm: ./ffmpeg_bin trong repo, hoặc
+# ffmpeg_bin của tool kế bên (vd ../review-drama/ffmpeg_bin).
+_REPO = Path(__file__).resolve().parents[1]
+_BUNDLED_DIRS = [
+    _REPO / "ffmpeg_bin",
+    _REPO.parent / "review-drama" / "ffmpeg_bin",
+]
+# Có thể trỏ tay qua biến môi trường DUBVOICE_FFMPEG_DIR.
+if os.environ.get("DUBVOICE_FFMPEG_DIR"):
+    _BUNDLED_DIRS.insert(0, Path(os.environ["DUBVOICE_FFMPEG_DIR"]))
 
 _CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
@@ -22,9 +30,10 @@ _CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 def _resolve(name: str) -> str:
     """Trả về đường dẫn tới ffmpeg/ffprobe: ưu tiên bundled, sau đó PATH."""
     exe = f"{name}.exe" if os.name == "nt" else name
-    bundled = _BUNDLED / exe
-    if bundled.exists():
-        return str(bundled)
+    for d in _BUNDLED_DIRS:
+        cand = d / exe
+        if cand.exists():
+            return str(cand)
     found = shutil.which(name)
     if found:
         return found
