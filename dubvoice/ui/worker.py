@@ -5,7 +5,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal
 
-from ..assemble import run_full
+from ..assemble import export_voice_segments, run_full
 from ..project import Project
 from ..tts import TtsEngine
 
@@ -15,10 +15,11 @@ class RenderWorker(QThread):
     finished_ok = Signal(str, int, int)  # out_path, n_errors, n_heavy
     failed = Signal(str)
 
-    def __init__(self, project: Project, out_path: str):
+    def __init__(self, project: Project, out_path: str, *, mode: str = "final"):
         super().__init__()
         self.project = project
         self.out_path = out_path
+        self.mode = mode
         self._stop = False
 
     def stop(self) -> None:
@@ -26,7 +27,8 @@ class RenderWorker(QThread):
 
     def run(self) -> None:
         try:
-            _, renders = run_full(
+            runner = export_voice_segments if self.mode == "segments" else run_full
+            _, renders = runner(
                 self.project,
                 Path(self.out_path),
                 engine=TtsEngine(),

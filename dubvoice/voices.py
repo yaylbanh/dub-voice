@@ -44,13 +44,20 @@ class VoiceConfig:
     """Cấu hình một 'nhân vật' — đa giọng phân biệt bằng pitch/rate."""
     label: str                       # tên nhân vật, vd 'Nam chính'
     voice: str = "vi-VN-NamMinhNeural"  # short_name của giọng Edge
-    rate_pct: int = 0                # tốc độ nền -50..+100 (%)
+    rate_pct: int = 0                # tốc độ nền -50..+100 (%) cho Edge TTS
     pitch_hz: int = 0                # cao độ -50..+50 (Hz) để phân biệt nhân vật
     volume_pct: int = 0              # âm lượng -50..+50 (%)
     color: str = "#2563eb"           # màu chấm hiển thị trong UI
 
     def edge_rate(self) -> str:
         return f"{'+' if self.rate_pct >= 0 else ''}{self.rate_pct}%"
+
+    def speed_multiplier(self) -> float:
+        return 1.0 + (self.rate_pct / 100.0)
+
+    def set_speed_multiplier(self, value: float) -> None:
+        multiplier = max(0.5, min(2.0, value))
+        self.rate_pct = int(round((multiplier - 1.0) * 100))
 
     def edge_pitch(self) -> str:
         return f"{'+' if self.pitch_hz >= 0 else ''}{self.pitch_hz}Hz"

@@ -68,6 +68,40 @@ class PreviewPlayer:
         except FileNotFoundError:
             pass  # không có ffplay → bỏ qua phát, file vẫn đã sinh
 
+    def play_source(
+        self,
+        media_path: str,
+        *,
+        start_ms: int,
+        end_ms: int,
+        on_error=None,
+        on_state=None,
+    ) -> None:
+        self.stop()
+        duration_s = max(0.1, (end_ms - start_ms) / 1000)
+        start_s = max(0.0, start_ms / 1000)
+        if on_state:
+            on_state("Đang phát tiếng gốc…")
+        try:
+            self._proc = subprocess.Popen(
+                [
+                    ffmpeg.ffplay_path(),
+                    "-nodisp",
+                    "-autoexit",
+                    "-loglevel",
+                    "quiet",
+                    "-ss",
+                    f"{start_s:.3f}",
+                    "-t",
+                    f"{duration_s:.3f}",
+                    media_path,
+                ],
+                creationflags=_CREATE_NO_WINDOW,
+            )
+        except FileNotFoundError:
+            if on_error:
+                on_error("Không tìm thấy ffplay để phát tiếng gốc.")
+
     def stop(self) -> None:
         if self._proc and self._proc.poll() is None:
             self._proc.terminate()

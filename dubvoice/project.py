@@ -61,6 +61,9 @@ class Project:
     def voice_map(self) -> dict[str, VoiceConfig]:
         return {v.label: v for v in self.voices}
 
+    def has_explicit_voice(self, block: Block) -> bool:
+        return bool(block.voice_label and block.voice_label in self.voice_map())
+
     def resolve_voice(self, block: Block) -> VoiceConfig | None:
         vm = self.voice_map()
         if block.voice_label and block.voice_label in vm:

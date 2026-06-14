@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 
 from . import voices as voices_mod
-from .assemble import run_full
+from .assemble import export_voice_segments, run_full
 from .project import Project
 from .tts import TtsEngine
 from .voices import VoiceConfig
@@ -31,6 +31,40 @@ def _cmd_voices(args) -> int:
         return 0
     for v in vs:
         print(f"  {v.short_name:32s} {v.gender:7s} {v.friendly}")
+    return 0
+
+
+def _cmd_segments(args) -> int:
+    srt = Path(args.srt)
+    if not srt.exists():
+        print(f"Không thấy file SRT: {srt}", file=sys.stderr)
+        return 1
+
+    proj = Project.from_srt(srt)
+    if args.locale:
+        proj.locale = args.locale
+    proj.max_tempo = args.max_tempo
+
+    if args.voice:
+        cfg = VoiceConfig("Mặc định", args.voice)
+        proj.voices = [cfg]
+        proj.default_voice = cfg.label
+        for b in proj.blocks:
+            b.voice_label = cfg.label
+
+    out_dir = Path(args.output_dir)
+
+    def progress(done, total, msg):
+        pct = int(done / total * 100) if total else 0
+        print(f"\r[{pct:3d}%] {done}/{total} {msg:40s}", end="", flush=True)
+
+    print(f"Xuất voice segments {len(proj.blocks)} block -> {out_dir}")
+    _, renders = export_voice_segments(proj, out_dir, engine=TtsEngine(), progress=progress)
+    print()
+    errs = [r for r in renders if r.error]
+    heavy = [r for r in renders if r.fit and r.fit.is_heavy]
+    print(f"Xong: {out_dir}")
+    print(f"  Lỗi: {len(errs)} block | Lệch nặng (>1s): {len(heavy)} block")
     return 0
 
 
@@ -93,6 +127,14 @@ def main(argv: list[str] | None = None) -> int:
     pd.add_argument("--replace-audio", action="store_true", help="Thay hẳn tiếng gốc")
     pd.add_argument("--max-tempo", type=float, default=1.5, help="Giới hạn tăng tốc (1.5)")
     pd.set_defaults(func=_cmd_dub)
+
+    ps = sub.add_parser("segments", help="Xuất folder 0001.wav cho review-drama")
+    ps.add_argument("srt")
+    ps.add_argument("-o", "--output-dir", required=True, help="Thư mục ra")
+    ps.add_argument("--voice", help="Giọng đơn (short_name Edge)")
+    ps.add_argument("--locale", help="Locale của phụ đề, vd vi-VN")
+    ps.add_argument("--max-tempo", type=float, default=1.5, help="Giới hạn tăng tốc (1.5)")
+    ps.set_defaults(func=_cmd_segments)
 
     pg = sub.add_parser("gui", help="Mở giao diện đồ hoạ")
     pg.set_defaults(func=lambda a: (__import__("dubvoice.ui.app", fromlist=["main"]).main() or 0))

@@ -10,8 +10,10 @@ Chiến lược (scale tới hàng nghìn block, không cần pydub/numpy):
 """
 from __future__ import annotations
 
+import csv
 import shutil
 import tempfile
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -19,11 +21,13 @@ from typing import Callable
 from . import ffmpeg
 from .fit import FitResult, compute as compute_fit
 from .project import Block, Project
+from .srt import format_timecode
 from .text import clean as clean_text
 from .tts import TtsEngine, TtsError
 
 SAMPLE_RATE = 44100
 CHANNELS = 2
+EDGE_TTS_MAX_WORKERS = 10
 ProgressFn = Callable[[int, int, str], None]  # done, total, message
 
 
@@ -33,6 +37,15 @@ class BlockRender:
     wav_path: Path | None
     fit: FitResult | None
     error: str | None = None
+
+
+@dataclass
+class _RenderTask:
+    order_index: int
+    block: Block
+    voice_label: str
+    voice_key: str
+    text: str
 
 
 def _to_fitted_wav(src_mp3: Path, tempo: float, dst_wav: Path) -> None:
@@ -64,33 +77,98 @@ def render_blocks(
     progress: ProgressFn | None = None,
     should_stop: Callable[[], bool] | None = None,
 ) -> list[BlockRender]:
-    """Sinh giọng + tính fit cho mọi block đang bật. Trả danh sách BlockRender."""
+    """Sinh giọng theo từng giọng, rồi tính fit cho mọi block đang bật."""
     active = [b for b in project.blocks if b.enabled and b.text.strip()]
     total = len(active)
-    results: list[BlockRender] = []
-    for i, block in enumerate(active, 1):
-        if should_stop and should_stop():
-            break
+    results: list[BlockRender | None] = [None] * total
+    tasks: list[_RenderTask] = []
+    voice_groups: dict[str, list[_RenderTask]] = {}
+
+    def voice_group_key(cfg) -> str:
+        return "|".join(
+            [
+                cfg.label,
+                cfg.voice,
+                cfg.edge_rate(),
+                cfg.edge_pitch(),
+                cfg.edge_volume(),
+            ]
+        )
+
+    for i, block in enumerate(active):
         cfg = project.resolve_voice(block)
         if cfg is None:
-            results.append(BlockRender(block, None, None, "Chưa cấu hình giọng"))
+            results[i] = BlockRender(block, None, None, "Chưa cấu hình giọng")
             continue
         txt = clean_text(block.text, locale=project.locale)
         if not txt:
-            results.append(BlockRender(block, None, None, "Text rỗng sau khi làm sạch"))
+            results[i] = BlockRender(block, None, None, "Text rỗng sau khi làm sạch")
             continue
+        key = voice_group_key(cfg)
+        task = _RenderTask(i, block, cfg.label, key, txt)
+        tasks.append(task)
+        voice_groups.setdefault(key, []).append(task)
+
+    def render_one(task: _RenderTask) -> BlockRender:
+        cfg = project.resolve_voice(task.block)
+        if cfg is None:
+            return BlockRender(task.block, None, None, "Chưa cấu hình giọng")
         try:
-            mp3 = engine.synth(txt, cfg)
+            mp3 = engine.synth(task.text, cfg)
             natural = ffmpeg.probe_duration_ms(mp3)
-            fit = compute_fit(natural, block.slot_ms, max_tempo=project.max_tempo)
-            wav = work_dir / f"blk_{block.index:06d}.wav"
+            fit = compute_fit(natural, task.block.slot_ms, max_tempo=project.max_tempo)
+            wav = work_dir / f"blk_{task.block.index:06d}.wav"
             _to_fitted_wav(mp3, fit.tempo, wav)
-            results.append(BlockRender(block, wav, fit))
+            return BlockRender(task.block, wav, fit)
         except (TtsError, RuntimeError) as e:
-            results.append(BlockRender(block, None, None, str(e)))
-        if progress:
-            progress(i, total, f"Block #{block.index}")
-    return results
+            return BlockRender(task.block, None, None, str(e))
+
+    if total <= 1:
+        for task in tasks:
+            if should_stop and should_stop():
+                break
+            results[task.order_index] = render_one(task)
+            if progress:
+                progress(task.order_index + 1, total, f"{task.voice_label} · Block #{task.block.index}")
+        return [r for r in results if r is not None]
+
+    completed = 0
+    for group_tasks in voice_groups.values():
+        if should_stop and should_stop():
+            break
+        max_workers = min(EDGE_TTS_MAX_WORKERS, len(group_tasks))
+        future_to_task: dict = {}
+        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="edge-tts") as executor:
+            pending = set()
+            next_submit = 0
+
+            while next_submit < len(group_tasks) and len(pending) < max_workers:
+                future = executor.submit(render_one, group_tasks[next_submit])
+                future_to_task[future] = group_tasks[next_submit]
+                pending.add(future)
+                next_submit += 1
+
+            while pending:
+                if should_stop and should_stop():
+                    for future in pending:
+                        future.cancel()
+                    break
+                done, pending = wait(pending, timeout=0.1, return_when=FIRST_COMPLETED)
+                if not done:
+                    continue
+                for future in done:
+                    task = future_to_task.pop(future)
+                    results[task.order_index] = future.result()
+                    completed += 1
+                    if progress:
+                        progress(completed, total, f"{task.voice_label} · Block #{task.block.index}")
+                    if next_submit < len(group_tasks):
+                        new_task = group_tasks[next_submit]
+                        new_future = executor.submit(render_one, new_task)
+                        future_to_task[new_future] = new_task
+                        pending.add(new_future)
+                        next_submit += 1
+    return [r for r in results if r is not None]
 
 
 def assemble_audio(
@@ -134,6 +212,61 @@ def assemble_audio(
         "-c:a", "pcm_s16le", str(out_wav),
     ])
     return out_wav
+
+
+def write_voice_segments_manifest(renders: list[BlockRender], output_dir: Path) -> Path:
+    manifest_path = output_dir / "voice_segments.csv"
+    ok = [r for r in renders if r.wav_path and r.fit]
+    with manifest_path.open("w", encoding="utf-8-sig", newline="") as file:
+        writer = csv.writer(file)
+        writer.writerow(["index", "start", "end", "duration_ms", "file_name", "text"])
+        for render_index, render in enumerate(ok, start=1):
+            writer.writerow(
+                [
+                    render.block.index,
+                    format_timecode(render.block.start_ms).replace(",", "."),
+                    format_timecode(render.block.end_ms).replace(",", "."),
+                    render.fit.fitted_ms,
+                    f"{render_index:04d}.wav",
+                    render.block.text.replace("\n", " ").strip(),
+                ]
+            )
+    return manifest_path
+
+
+def export_voice_segments(
+    project: Project,
+    output_dir: Path,
+    *,
+    engine: TtsEngine | None = None,
+    progress: ProgressFn | None = None,
+    should_stop: Callable[[], bool] | None = None,
+) -> tuple[Path, list[BlockRender]]:
+    """Xuất từng block thành 0001.wav + voice_segments.csv cho review-drama."""
+    engine = engine or TtsEngine()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="dubvoice_segments_") as tmp:
+        work = Path(tmp)
+        renders = render_blocks(
+            project,
+            engine,
+            work_dir=work,
+            progress=progress,
+            should_stop=should_stop,
+        )
+        ok = [r for r in renders if r.wav_path and r.fit]
+        if not ok:
+            raise RuntimeError("Không có block nào render thành công để xuất segment.")
+        total = len(ok)
+        for idx, render in enumerate(ok, start=1):
+            if should_stop and should_stop():
+                raise RuntimeError("Đã huỷ.")
+            dst = output_dir / f"{idx:04d}.wav"
+            shutil.copyfile(render.wav_path, dst)
+            if progress:
+                progress(idx, total, f"Xuất {dst.name}")
+        write_voice_segments_manifest(renders, output_dir)
+    return output_dir, renders
 
 
 def mux(
